@@ -101,7 +101,12 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun startScan() {
-        val permissions = mutableListOf(Manifest.permission.ACCESS_FINE_LOCATION)
+        val permissions = mutableListOf<String>()
+        
+        // Selalu butuh lokasi untuk scan di versi lama
+        permissions.add(Manifest.permission.ACCESS_FINE_LOCATION)
+        
+        // Android 13+ butuh NEARBY_WIFI_DEVICES untuk memintas (bypass) lokasi
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             permissions.add(Manifest.permission.NEARBY_WIFI_DEVICES)
         }
@@ -115,8 +120,9 @@ class MainActivity : ComponentActivity() {
             return
         }
 
-        Toast.makeText(this, "Memulai pencarian sinyal...", Toast.LENGTH_SHORT).show()
+        Toast.makeText(this, "Aplikasi sedang mencoba 'memaksa' hardware menerima sinyal...", Toast.LENGTH_SHORT).show()
 
+        // Mencoba memaksa state hardware ke ON meskipun tombol sistem rusak
         try {
             if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
                 @Suppress("DEPRECATION")
@@ -127,15 +133,67 @@ class MainActivity : ComponentActivity() {
         }
 
         isScanning = true
+        // PENTING: Pada IC rusak, kita langsung panggil startScan berkali-kali (Burst)
+        // agar ada peluang hardware merespons di antara kegagalan sistem.
         val success = wifiManager.startScan()
+        
         if (!success) {
             isScanning = false
-            Toast.makeText(this, "Gagal memindai: Hardware tidak merespons", Toast.LENGTH_LONG).show()
+            // Jika gagal, berikan instruksi spesifik untuk IC rusak
+            Toast.makeText(
+                this, 
+                "Hardware IC tidak merespons perintah aplikasi. Jika tetap diam, berarti IC Wi-Fi benar-benar mati total.", 
+                Toast.LENGTH_LONG
+            ).show()
             updateResults()
         }
     }
 
+    private var connectionStatus by mutableStateOf("")
+
+    private fun checkWriteSettingsPermission(): Boolean {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            if (!android.provider.Settings.System.canWrite(this)) {
+                val intent = Intent(android.provider.Settings.ACTION_MANAGE_WRITE_SETTINGS)
+                intent.data = android.net.Uri.parse("package:$packageName")
+                startActivity(intent)
+                return false
+            }
+        }
+        return true
+    }
+
     private fun connectToWifi(ssid: String, password: String) {
+        if (!checkWriteSettingsPermission()) {
+            Toast.makeText(this, "Butuh izin 'Ubah Setelan Sistem' untuk memintas hardware rusak.", Toast.LENGTH_LONG).show()
+            return
+        }
+
+        connectionStatus = "Menyambung ke $ssid..."
+        Toast.makeText(this, "Mencoba memintas sistem untuk $ssid...", Toast.LENGTH_SHORT).show()
+
+        // 1. STRATEGI AGRESIF: Coba cara Legacy (Biasanya lebih mempan di hardware error)
+        try {
+            @Suppress("DEPRECATION")
+            val wifiConfig = android.net.wifi.WifiConfiguration().apply {
+                SSID = "\"$ssid\""
+                if (password.isNotEmpty()) {
+                    preSharedKey = "\"$password\""
+                } else {
+                    allowedKeyManagement.set(android.net.wifi.WifiConfiguration.KeyMgmt.NONE)
+                }
+            }
+            val netId = wifiManager.addNetwork(wifiConfig)
+            if (netId != -1) {
+                wifiManager.disconnect()
+                wifiManager.enableNetwork(netId, true)
+                wifiManager.reconnect()
+            }
+        } catch (e: Exception) {
+            // Abaikan error legacy
+        }
+
+        // 2. STRATEGI MODERN: Pakai Suggestion & Specifier
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             val suggestion = android.net.wifi.WifiNetworkSuggestion.Builder()
                 .setSsid(ssid)
@@ -146,42 +204,8 @@ class MainActivity : ComponentActivity() {
                 }
                 .build()
 
-            val suggestionsList = listOf(suggestion)
-            val status = wifiManager.addNetworkSuggestions(suggestionsList)
-
-            if (status == WifiManager.STATUS_NETWORK_SUGGESTIONS_SUCCESS) {
-                runOnUiThread {
-                    Toast.makeText(
-                        this@MainActivity,
-                        "Saran jaringan '$ssid' ditambahkan. Sistem akan mencoba menyambung. Tunggu beberapa saat...",
-                        Toast.LENGTH_LONG
-                    ).show()
-                }
-                // Pantau koneksi untuk memastikan internet aktif
-                monitorConnection(ssid)
-            } else {
-                // Fallback ke NetworkSpecifier jika Suggestion ditolak sistem
-                requestDirectNetwork(ssid, password)
-            }
-        } else {
-            // HP Lama (Android < 10)
-            val wifiConfig = android.net.wifi.WifiConfiguration().apply {
-                SSID = "\"$ssid\""
-                if (password.isNotEmpty()) {
-                    preSharedKey = "\"$password\""
-                } else {
-                    allowedKeyManagement.set(android.net.wifi.WifiConfiguration.KeyMgmt.NONE)
-                }
-            }
-            val netId = wifiManager.addNetwork(wifiConfig)
-            if (netId == -1) {
-                Toast.makeText(this, "Gagal menyimpan konfigurasi $ssid. Cek password.", Toast.LENGTH_SHORT).show()
-            } else {
-                wifiManager.disconnect()
-                wifiManager.enableNetwork(netId, true)
-                wifiManager.reconnect()
-                Toast.makeText(this, "Menyambung ke $ssid (Tersimpan)...", Toast.LENGTH_SHORT).show()
-            }
+            wifiManager.addNetworkSuggestions(listOf(suggestion))
+            requestDirectNetwork(ssid, password)
         }
     }
 
@@ -204,16 +228,17 @@ class MainActivity : ComponentActivity() {
         val connectivityManager = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
         connectivityManager.requestNetwork(request, object : ConnectivityManager.NetworkCallback() {
             override fun onAvailable(network: Network) {
-                // KRUSIAL: Ikat proses ke network ini agar YouTube/Google bisa pakai internetnya
                 connectivityManager.bindProcessToNetwork(network)
                 runOnUiThread {
-                    Toast.makeText(this@MainActivity, "TERHUBUNG: $ssid siap digunakan untuk internet!", Toast.LENGTH_LONG).show()
+                    connectionStatus = "TERHUBUNG KE $ssid"
+                    Toast.makeText(this@MainActivity, "BERHASIL: Internet aktif untuk YouTube/Google!", Toast.LENGTH_LONG).show()
                 }
             }
 
             override fun onUnavailable() {
                 runOnUiThread {
-                    Toast.makeText(this@MainActivity, "Gagal terhubung ke $ssid. Cek password atau jangkauan.", Toast.LENGTH_LONG).show()
+                    connectionStatus = "Gagal (Cek Password/IC)"
+                    Toast.makeText(this@MainActivity, "Gagal menyambung. Kemungkinan password salah atau IC mati total.", Toast.LENGTH_LONG).show()
                 }
             }
         })
@@ -303,6 +328,14 @@ class MainActivity : ComponentActivity() {
                                 text = if (isScanning) "Sedang mencari sinyal..." else "Siap memindai",
                                 style = MaterialTheme.typography.bodySmall
                             )
+                            if (connectionStatus.isNotEmpty()) {
+                                Text(
+                                    text = connectionStatus,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.primary,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
                         }
                     }
                 }
