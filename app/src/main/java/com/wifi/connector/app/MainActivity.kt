@@ -105,19 +105,24 @@ class MainActivity : ComponentActivity() {
             return
         }
 
-        if (!wifiManager.isWifiEnabled) {
-            Toast.makeText(this, "Please enable Wi-Fi", Toast.LENGTH_SHORT).show()
-            // Try to enable it programmatically (deprecated but might work for "broken IC" scenarios if it's just a UI lock)
+        // Kami mencoba "memaksa" Wi-Fi nyala di latar belakang jika memungkinkan (depresi di Android 10+)
+        // Tapi kami TIDAK memblokir proses scan jika sistem bilang Wi-Fi mati.
+        // Pada HP dengan IC rusak, kadang hardware bisa merespons scan meski statusnya "Off".
+        try {
             if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
+                @Suppress("DEPRECATION")
                 wifiManager.isWifiEnabled = true
             }
+        } catch (e: Exception) {
+            // Abaikan error jika sistem menolak perintah force enable
         }
 
         isScanning = true
+        // Langsung panggil startScan tanpa peduli status isWifiEnabled
         val success = wifiManager.startScan()
         if (!success) {
             isScanning = false
-            updateResults() // Fallback to old results
+            updateResults() // Gunakan hasil lama jika ada
         }
     }
 
