@@ -1,0 +1,6 @@
+{
+  "name": "WifiConnector",
+  "description": "Emergency Wi-Fi connector for phones with connectivity issues. Scans and connects to nearby networks.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
