@@ -39,6 +39,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
@@ -136,7 +137,6 @@ class MainActivity : ComponentActivity() {
 
     private fun connectToWifi(ssid: String, password: String) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            // Menggunakan WifiNetworkSuggestion agar internet bisa dipakai di seluruh HP (YouTube, Google, dll)
             val suggestion = android.net.wifi.WifiNetworkSuggestion.Builder()
                 .setSsid(ssid)
                 .apply {
@@ -153,39 +153,18 @@ class MainActivity : ComponentActivity() {
                 runOnUiThread {
                     Toast.makeText(
                         this@MainActivity,
-                        "Saran jaringan ditambahkan! Sistem akan menyambungkan ke $ssid secara otomatis.",
+                        "Saran jaringan '$ssid' ditambahkan. Sistem akan mencoba menyambung. Tunggu beberapa saat...",
                         Toast.LENGTH_LONG
                     ).show()
                 }
+                // Pantau koneksi untuk memastikan internet aktif
+                monitorConnection(ssid)
             } else {
-                // Jika Suggestion gagal, coba pakai NetworkSpecifier sebagai cadangan
-                val specifier = WifiNetworkSpecifier.Builder()
-                    .setSsid(ssid)
-                    .apply {
-                        if (password.isNotEmpty()) {
-                            setWpa2Passphrase(password)
-                        }
-                    }
-                    .build()
-
-                val request = NetworkRequest.Builder()
-                    .addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
-                    .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) // Pastikan minta akses internet
-                    .setNetworkSpecifier(specifier)
-                    .build()
-
-                val connectivityManager = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
-                connectivityManager.requestNetwork(request, object : ConnectivityManager.NetworkCallback() {
-                    override fun onAvailable(network: Network) {
-                        connectivityManager.bindProcessToNetwork(network)
-                        runOnUiThread {
-                            Toast.makeText(this@MainActivity, "Tersambung ke $ssid!", Toast.LENGTH_LONG).show()
-                        }
-                    }
-                })
+                // Fallback ke NetworkSpecifier jika Suggestion ditolak sistem
+                requestDirectNetwork(ssid, password)
             }
         } else {
-            // Cara lama untuk HP di bawah Android 10
+            // HP Lama (Android < 10)
             val wifiConfig = android.net.wifi.WifiConfiguration().apply {
                 SSID = "\"$ssid\""
                 if (password.isNotEmpty()) {
@@ -195,11 +174,68 @@ class MainActivity : ComponentActivity() {
                 }
             }
             val netId = wifiManager.addNetwork(wifiConfig)
-            wifiManager.disconnect()
-            wifiManager.enableNetwork(netId, true)
-            wifiManager.reconnect()
-            Toast.makeText(this, "Mencoba menyambung ke $ssid...", Toast.LENGTH_SHORT).show()
+            if (netId == -1) {
+                Toast.makeText(this, "Gagal menyimpan konfigurasi $ssid. Cek password.", Toast.LENGTH_SHORT).show()
+            } else {
+                wifiManager.disconnect()
+                wifiManager.enableNetwork(netId, true)
+                wifiManager.reconnect()
+                Toast.makeText(this, "Menyambung ke $ssid (Tersimpan)...", Toast.LENGTH_SHORT).show()
+            }
         }
+    }
+
+    private fun requestDirectNetwork(ssid: String, password: String) {
+        val specifier = WifiNetworkSpecifier.Builder()
+            .setSsid(ssid)
+            .apply {
+                if (password.isNotEmpty()) {
+                    setWpa2Passphrase(password)
+                }
+            }
+            .build()
+
+        val request = NetworkRequest.Builder()
+            .addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
+            .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+            .setNetworkSpecifier(specifier)
+            .build()
+
+        val connectivityManager = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+        connectivityManager.requestNetwork(request, object : ConnectivityManager.NetworkCallback() {
+            override fun onAvailable(network: Network) {
+                // KRUSIAL: Ikat proses ke network ini agar YouTube/Google bisa pakai internetnya
+                connectivityManager.bindProcessToNetwork(network)
+                runOnUiThread {
+                    Toast.makeText(this@MainActivity, "TERHUBUNG: $ssid siap digunakan untuk internet!", Toast.LENGTH_LONG).show()
+                }
+            }
+
+            override fun onUnavailable() {
+                runOnUiThread {
+                    Toast.makeText(this@MainActivity, "Gagal terhubung ke $ssid. Cek password atau jangkauan.", Toast.LENGTH_LONG).show()
+                }
+            }
+        })
+    }
+
+    private fun monitorConnection(targetSsid: String) {
+        val connectivityManager = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+        val request = NetworkRequest.Builder()
+            .addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
+            .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+            .build()
+
+        connectivityManager.registerNetworkCallback(request, object : ConnectivityManager.NetworkCallback() {
+            override fun onAvailable(network: Network) {
+                val caps = connectivityManager.getNetworkCapabilities(network)
+                // Jika ini adalah wifi yang kita mau, ikat prosesnya
+                connectivityManager.bindProcessToNetwork(network)
+                runOnUiThread {
+                    Toast.makeText(this@MainActivity, "Internet Aktif via $targetSsid!", Toast.LENGTH_SHORT).show()
+                }
+            }
+        })
     }
 
     @OptIn(ExperimentalMaterial3Api::class)
@@ -373,12 +409,19 @@ class MainActivity : ComponentActivity() {
 
     @Composable
     fun WifiItem(result: ScanResult, onClick: () -> Unit) {
+        val context = LocalContext.current
+        val isSaved = remember(result.SSID) {
+            if (ActivityCompat.checkSelfPermission(context, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED) {
+                @Suppress("DEPRECATION")
+                wifiManager.configuredNetworks?.any { it.SSID == "\"${result.SSID}\"" } == true
+            } else false
+        }
+
         val signalIcon = when {
             result.level > -50 -> Icons.Default.Wifi
             result.level > -70 -> Icons.Default.Wifi
             else -> Icons.Default.Wifi
         }
-        // Material Icons don't have bars, so we just use color for strength
         val signalColor = when {
             result.level > -50 -> MaterialTheme.colorScheme.primary
             result.level > -70 -> MaterialTheme.colorScheme.secondary
@@ -392,14 +435,39 @@ class MainActivity : ComponentActivity() {
                 .padding(16.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Icon(signalIcon, contentDescription = null, tint = signalColor)
+            Box(contentAlignment = Alignment.BottomEnd) {
+                Icon(signalIcon, contentDescription = null, tint = signalColor, modifier = Modifier.size(32.dp))
+                if (isSaved) {
+                    Surface(
+                        color = MaterialTheme.colorScheme.primary,
+                        shape = androidx.compose.foundation.shape.CircleShape,
+                        modifier = Modifier.size(12.dp).offset(x = 4.dp, y = 4.dp)
+                    ) {}
+                }
+            }
             Spacer(modifier = Modifier.width(16.dp))
             Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = if (result.SSID.isEmpty()) "[Hidden Network]" else result.SSID,
-                    fontWeight = FontWeight.Bold,
-                    style = MaterialTheme.typography.bodyLarge
-                )
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        text = if (result.SSID.isEmpty()) "[Hidden Network]" else result.SSID,
+                        fontWeight = FontWeight.Bold,
+                        style = MaterialTheme.typography.bodyLarge
+                    )
+                    if (isSaved) {
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Surface(
+                            color = MaterialTheme.colorScheme.primaryContainer,
+                            shape = MaterialTheme.shapes.extraSmall
+                        ) {
+                            Text(
+                                "Tersimpan",
+                                modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp),
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onPrimaryContainer
+                            )
+                        }
+                    }
+                }
                 Text(
                     text = result.capabilities,
                     style = MaterialTheme.typography.bodySmall,
