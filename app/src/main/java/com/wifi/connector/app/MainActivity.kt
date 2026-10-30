@@ -100,29 +100,37 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun startScan() {
-        if (ActivityCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
-            ActivityCompat.requestPermissions(this, arrayOf(Manifest.permission.ACCESS_FINE_LOCATION), 1)
+        val permissions = mutableListOf(Manifest.permission.ACCESS_FINE_LOCATION)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            permissions.add(Manifest.permission.NEARBY_WIFI_DEVICES)
+        }
+
+        val missingPermissions = permissions.filter {
+            ActivityCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED
+        }
+
+        if (missingPermissions.isNotEmpty()) {
+            ActivityCompat.requestPermissions(this, missingPermissions.toTypedArray(), 1)
             return
         }
 
-        // Kami mencoba "memaksa" Wi-Fi nyala di latar belakang jika memungkinkan (depresi di Android 10+)
-        // Tapi kami TIDAK memblokir proses scan jika sistem bilang Wi-Fi mati.
-        // Pada HP dengan IC rusak, kadang hardware bisa merespons scan meski statusnya "Off".
+        Toast.makeText(this, "Memulai pencarian sinyal...", Toast.LENGTH_SHORT).show()
+
         try {
             if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
                 @Suppress("DEPRECATION")
                 wifiManager.isWifiEnabled = true
             }
         } catch (e: Exception) {
-            // Abaikan error jika sistem menolak perintah force enable
+            // Abaikan
         }
 
         isScanning = true
-        // Langsung panggil startScan tanpa peduli status isWifiEnabled
         val success = wifiManager.startScan()
         if (!success) {
             isScanning = false
-            updateResults() // Gunakan hasil lama jika ada
+            Toast.makeText(this, "Gagal memindai: Hardware tidak merespons", Toast.LENGTH_LONG).show()
+            updateResults()
         }
     }
 
